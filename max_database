@@ -1,0 +1,7 @@
+
+CREATE TABLE health_data (
+    id SERIAL PRIMARY KEY,
+    heart_rate INT,
+    spo2 INT,
+    timestamp TIMESTAMP DEFAULT NOW()
+);
