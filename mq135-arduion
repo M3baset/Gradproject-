@@ -1,0 +1,113 @@
+#include <WiFi.h>
+#include <HTTPClient.h>
+
+// Wi-Fi credentials
+const char* ssid = "MAH.";
+const char* password = "eng.mohamed97..";
+const char* serverUrl = "http://192.168.1.8/supa_mq135.php";
+
+// Sensor configuration
+int mqpin = 34; // Use a dedicated ADC pin (e.g., GPIO 34)
+float R0 = 10.0; // Baseline resistance (calibrate this value in clean air)
+float RLOAD = 10.0; // Load resistance (e.g., 10kΩ)
+
+// Calibration function
+void calibrate() {
+    float sum = 0.0;
+    for (int i = 0; i < 5; i++) {
+        int rawValue = analogRead(mqpin);
+        float Rs = (RLOAD * 4095.0) / rawValue - RLOAD;
+        sum += Rs;
+        delay(1000);
+    }
+    R0 = sum / 5.0; // Average R0 in clean air
+    Serial.print("Calibrated R0: ");
+    Serial.println(R0);
+    Serial.print("Raw ADC Value: ");
+
+Serial.print("Rs Value: ");
+
+
+
+}
+
+void setup() {
+    Serial.begin(115200);
+    WiFi.begin(ssid, password);
+    while (WiFi.status() != WL_CONNECTED) {
+        delay(1000);
+        Serial.println("Connecting to WiFi...");
+    }
+    Serial.println("Connected to WiFi!");
+
+    // Calibrate the sensor in clean air
+    calibrate();
+}
+
+void loop() {
+    int rawValue = analogRead(mqpin);
+    if (rawValue == 0) {
+    Serial.println("Error: rawValue is 0, check sensor connection!");
+    return; // Skip calculations if reading is invalid
+}
+
+   float Rs = (RLOAD * 4095.0) / rawValue - RLOAD;
+if (Rs <= 0) {
+    Serial.println("Error: Rs is invalid, check sensor and R0 calibration!");
+    return;
+}
+    float ratio = Rs / R0;
+if (ratio <= 0 || isnan(ratio) || isinf(ratio)) {
+    Serial.println("Error: Invalid ratio, skipping calculations!");
+    return;
+}
+
+    // Calculate gas concentrations using formulas from the MQ-135 datasheet
+    float CO2 = 300.0 * pow(ratio, -0.85); // CO₂ (ppm)
+    float NH3 = 148.9 * pow(ratio, -1.12); // Ammonia (ppm)
+    float Alcohol = 200.0 * pow(ratio, -0.95); // Alcohol (ppm)
+    float Toluene = 300.0 * pow(ratio, -1.0); // Toluene (ppm)
+    float Acetone = 250.0 * pow(ratio, -0.8); // Acetone (ppm)
+
+    Serial.print("CO₂: ");
+    Serial.print(CO2);
+    Serial.print(" ppm | NH3: ");
+    Serial.print(NH3);
+    Serial.print(" ppm | Alcohol: ");
+    Serial.print(Alcohol);
+    Serial.print(" ppm | Toluene: ");
+    Serial.print(Toluene);
+    Serial.print(" ppm | Acetone: ");
+    Serial.println(Acetone);
+
+    // Send data to the server
+    if (WiFi.status() == WL_CONNECTED) {
+        HTTPClient http;
+        http.begin(serverUrl);
+        http.addHeader("Content-Type", "application/json");
+
+  String payload = "{";
+payload += "\"co2\": " + String(CO2) + ",";
+payload += "\"nh3\": " + String(NH3) + ",";
+payload += "\"alcohol\": " + String(Alcohol) + ",";
+payload += "\"toluene\": " + String(Toluene) + ",";
+payload += "\"acetone\": " + String(Acetone);
+payload += "}";
+
+
+
+        int httpResponseCode = http.POST(payload);
+
+        if (httpResponseCode > 0) {
+            Serial.printf("HTTP Response Code: %d\n", httpResponseCode);
+        } else {
+            Serial.println("Error sending data to server");
+        }
+
+        http.end();
+    } else {
+        Serial.println("Not connected to WiFi");
+    }
+
+    delay(5000); // Send data every 5 seconds
+}
