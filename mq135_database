@@ -1,0 +1,9 @@
+CREATE TABLE gas_readings (
+    id SERIAL PRIMARY KEY,
+    co2 FLOAT,
+    nh3 FLOAT,
+    alcohol FLOAT,
+    toluene FLOAT,
+    acetone FLOAT,
+    reading_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
