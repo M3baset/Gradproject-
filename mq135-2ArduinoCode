@@ -1,0 +1,108 @@
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <math.h>
+
+// Wi-Fi credentials
+const char* ssid     = "MAH.";
+const char* password = "eng.mohamed97..";
+
+// Your PHP endpoint
+const char* serverUrl = "http://192.168.1.8/gass.php";
+
+// Sensor pins
+const int MQ135_PIN = 34;  // ADC1_CH6
+const int MQ2_PIN   = 32;  // ADC1_CH4
+
+// Calibration params (calibrate these in clean air!)
+float R0_135 = 10.0;
+float R0_2   = 10.0;
+const float RLOAD = 10.0;
+
+// Calibrate a given sensor pin
+void calibrate(int pin, float &R0) {
+  float sum = 0;
+  for (int i = 0; i < 10; i++) {
+    int raw = analogRead(pin);
+    float Rs = (RLOAD * 4095.0 / raw) - RLOAD;
+    sum += Rs;
+    delay(500);
+  }
+  R0 = sum / 10.0;
+  Serial.printf("Calibrated R0 (pin %d): %.2fΩ\n", pin, R0);
+}
+
+// Read and convert a sensor’s raw ADC to ppm via y = a·(ratio)^b
+float readSensor(int pin, float R0, float a, float b) {
+  int raw = analogRead(pin);
+  if (raw <= 0) return -1.0;
+  float Rs = (RLOAD * 4095.0 / raw) - RLOAD;
+  float ratio = Rs / R0;
+  if (ratio <= 0) return -1.0;
+  return a * pow(ratio, b);
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  // ADC setup for ESP32
+  analogReadResolution(12);                   // 12-bit → 0–4095
+  analogSetPinAttenuation(MQ135_PIN, ADC_11db);
+  analogSetPinAttenuation(MQ2_PIN,   ADC_11db);
+
+  // Connect Wi-Fi
+  WiFi.begin(ssid, password);
+  Serial.print("Connecting to Wi-Fi");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nWi-Fi connected!");
+
+  // Calibrate both sensors (in clean air)
+  calibrate(MQ135_PIN, R0_135);
+  calibrate(MQ2_PIN,   R0_2);
+}
+
+void loop() {
+  // MQ-135 readings
+  float CO2     = readSensor(MQ135_PIN, R0_135, 300.0, -0.85);
+  float NH3     = readSensor(MQ135_PIN, R0_135, 148.9, -1.12);
+  float Alcohol = readSensor(MQ135_PIN, R0_135, 200.0, -0.95);
+  float Toluene = readSensor(MQ135_PIN, R0_135, 300.0, -1.00);
+  float Acetone = readSensor(MQ135_PIN, R0_135, 250.0, -0.80);
+
+  // MQ-2 readings
+  float LPG   = readSensor(MQ2_PIN, R0_2, 1000.0, -2.2);
+  float CO    = readSensor(MQ2_PIN, R0_2, 1000.0, -2.7);
+  float Smoke = readSensor(MQ2_PIN, R0_2, 1000.0, -2.5);
+
+  // Build JSON payload
+  String payload = "{";
+  payload += "\"co2\":"     + String(CO2, 2)     + ",";
+  payload += "\"nh3\":"     + String(NH3, 2)     + ",";
+  payload += "\"alcohol\":" + String(Alcohol, 2) + ",";
+  payload += "\"toluene\":" + String(Toluene, 2) + ",";
+  payload += "\"acetone\":" + String(Acetone, 2) + ",";
+  payload += "\"lpg\":"     + String(LPG, 2)     + ",";
+  payload += "\"co\":"      + String(CO, 2)      + ",";
+  payload += "\"smoke\":"   + String(Smoke, 2);
+  payload += "}";
+
+  // Send to PHP
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+    http.begin(serverUrl);
+    http.addHeader("Content-Type", "application/json");
+    int code = http.POST(payload);
+    if (code > 0) {
+      Serial.printf("HTTP %d: %s\n", code, http.getString().c_str());
+    } else {
+      Serial.println("Send failed");
+    }
+    http.end();
+  } else {
+    Serial.println("Wi-Fi lost");
+  }
+
+  delay(5000);
+}
