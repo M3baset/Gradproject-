@@ -1,0 +1,12 @@
+create table gas_readings (
+  id         serial primary key,
+  co2        float,
+  nh3        float,
+  alcohol    float,
+  toluene    float,
+  acetone    float,
+  lpg        float,
+  co         float,
+  smoke      float,
+  created_at timestamp with time zone default now()
+);
