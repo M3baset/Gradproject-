@@ -1,0 +1,47 @@
+<?php
+header('Content-Type: application/json');
+
+// Supabase Postgres credentials
+$host     = 'aws-0-eu-central-1.pooler.supabase.com';
+$port     = '5432';
+$dbname   = 'postgres';
+$user     = 'postgres.czytuqnowdogaowfnfhe';
+$password = '235711';
+
+// Read and validate JSON
+$data = json_decode(file_get_contents('php://input'), true);
+$required = ['co2','nh3','alcohol','toluene','acetone','lpg','co','smoke'];
+foreach ($required as $key) {
+    if (!isset($data[$key])) {
+        http_response_code(400);
+        exit(json_encode(['status'=>'error','message'=>"Missing $key"]));
+    }
+}
+
+// Connect
+$conn = pg_connect("host=$host port=$port dbname=$dbname user=$user password=$password sslmode=require");
+if (!$conn) {
+    http_response_code(500);
+    exit(json_encode(['status'=>'error','message'=>'DB connection failed']));
+}
+
+// Insert
+$query = "
+  INSERT INTO gas_readings
+    (co2, nh3, alcohol, toluene, acetone, lpg, co, smoke, created_at)
+  VALUES
+    ($1,$2,$3,$4,$5,$6,$7,$8,NOW())
+";
+$params = [
+  $data['co2'],$data['nh3'],$data['alcohol'],$data['toluene'],
+  $data['acetone'],$data['lpg'],$data['co'],$data['smoke']
+];
+$res = pg_query_params($conn, $query, $params);
+if ($res) {
+    echo json_encode(['status'=>'success','message'=>'Data inserted']);
+} else {
+    http_response_code(500);
+    echo json_encode(['status'=>'error','message'=>'Insert failed']);
+}
+pg_close($conn);
+?>
