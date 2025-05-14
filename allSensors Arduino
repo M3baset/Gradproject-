@@ -1,0 +1,143 @@
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <Wire.h>
+#include <MAX30105.h>
+#include "spo2_algorithm.h"
+#include <math.h>
+
+// Wi-Fi credentials
+const char* ssid     = "MAH.";
+const char* password = "eng.mohamed97..";
+
+// Server endpoint
+const char* serverUrl = "http://192.168.1.8/api2.php";
+
+// MQ sensor pins & constants
+const int MQ135_PIN = 34;
+const int MQ2_PIN   = 32;
+const float RLOAD   = 10.0;
+float R0_135 = 10.0, R0_2 = 10.0;
+
+// MAX30102 object and buffers
+MAX30105 particleSensor;
+uint32_t irBuffer[100], redBuffer[100];
+int32_t heartRate, spo2;
+int8_t validHeartRate, validSpo2;
+
+void calibrate(int pin, float &R0) {
+  float sum = 0;
+  for (int i = 0; i < 10; i++) {
+    int raw = analogRead(pin);
+    float Rs = (RLOAD * 4095.0 / raw) - RLOAD;
+    sum += Rs;
+    delay(500);
+  }
+  R0 = sum / 10.0;
+}
+
+float readSensor(int pin, float R0, float a, float b) {
+  int raw = analogRead(pin);
+  if (raw <= 0) return -1.0;
+  float Rs = (RLOAD * 4095.0 / raw) - RLOAD;
+  float ratio = Rs / R0;
+  if (ratio <= 0) return -1.0;
+  return a * pow(ratio, b);
+}
+
+void setup() {
+  Serial.begin(115200);
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nWi-Fi connected!");
+
+  // MQ sensors
+  analogReadResolution(12);
+  analogSetPinAttenuation(MQ135_PIN, ADC_11db);
+  analogSetPinAttenuation(MQ2_PIN,   ADC_11db);
+  calibrate(MQ135_PIN, R0_135);
+  calibrate(MQ2_PIN,   R0_2);
+
+  // MAX30102
+  if (!particleSensor.begin(Wire, I2C_SPEED_FAST)) {
+    Serial.println("MAX30102 not found");
+    while (1);
+  }
+  particleSensor.setup();
+  particleSensor.setPulseAmplitudeRed(0x0A);
+  particleSensor.setPulseAmplitudeIR(0x0A);
+}
+
+void loop() {
+  // --- Read MQ sensors ---
+  float CO2     = readSensor(MQ135_PIN, R0_135, 300.0, -0.85);
+  float NH3     = readSensor(MQ135_PIN, R0_135, 148.9, -1.12);
+  float Alcohol = readSensor(MQ135_PIN, R0_135, 200.0, -0.95);
+  float Toluene = readSensor(MQ135_PIN, R0_135, 300.0, -1.00);
+  float Acetone = readSensor(MQ135_PIN, R0_135, 250.0, -0.80);
+  float LPG     = readSensor(MQ2_PIN,   R0_2,   1000.0, -2.2);
+  float CO      = readSensor(MQ2_PIN,   R0_2,   1000.0, -2.7);
+  float Smoke   = readSensor(MQ2_PIN,   R0_2,   1000.0, -2.5);
+
+  // --- Read MAX30102 ---
+  for (int i = 0; i < 100; i++) {
+    redBuffer[i] = particleSensor.getRed();
+    irBuffer[i]  = particleSensor.getIR();
+    delay(10);
+  }
+  maxim_heart_rate_and_oxygen_saturation(
+    irBuffer, 100, redBuffer,
+    &spo2, &validSpo2, &heartRate, &validHeartRate
+  );
+
+  // --- Build JSON payload, excluding any zero values ---
+  String payload = "{";
+
+  // Gas fields
+  auto appendField = [&](const char* name, float value){
+    if (value > 0) {
+      if (payload.length() > 1) payload += ",";
+      payload += "\"" + String(name) + "\":" + String(value, 2);
+    }
+  };
+  appendField("co2",      CO2);
+  appendField("nh3",      NH3);
+  appendField("alcohol",  Alcohol);
+  appendField("toluene",  Toluene);
+  appendField("acetone",  Acetone);
+  appendField("lpg",      LPG);
+  appendField("co",       CO);
+  appendField("smoke",    Smoke);
+
+  // Health fields
+  if (validHeartRate && heartRate > 0) {
+    if (payload.length() > 1) payload += ",";
+    payload += "\"heart_rate\":" + String(heartRate);
+  }
+  if (validSpo2 && spo2 > 0) {
+    if (payload.length() > 1) payload += ",";
+    payload += "\"spo2\":" + String(spo2);
+  }
+
+  payload += "}";
+
+  // --- Print to Serial for verification ---
+  Serial.println("Payload to send:");
+  Serial.println(payload);
+
+  // --- Send if non-empty payload beyond "{}" ---
+  if (WiFi.status() == WL_CONNECTED && payload.length() > 2) {
+    HTTPClient http;
+    http.begin(serverUrl);
+    http.addHeader("Content-Type", "application/json");
+    int code = http.POST(payload);
+    Serial.printf("HTTP %d: %s\n\n", code, http.getString().c_str());
+    http.end();
+  } else {
+    Serial.println("No valid data to send or Wi-Fi disconnected\n");
+  }
+
+  delay(5000);
+}
