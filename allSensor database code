@@ -1,0 +1,21 @@
+CREATE TABLE gas_data (
+    id SERIAL PRIMARY KEY,
+    co2 FLOAT,
+    nh3 FLOAT,
+    alcohol FLOAT,
+    toluene FLOAT,
+    acetone FLOAT,
+    lpg FLOAT,
+    co FLOAT,
+    smoke FLOAT,
+    timestamp TIMESTAMP DEFAULT NOW()
+);
+
+
+----------------------------------
+CREATE TABLE health_data (
+    id SERIAL PRIMARY KEY,
+    heart_rate INT,
+    spo2 INT,
+    timestamp TIMESTAMP DEFAULT NOW()
+);
