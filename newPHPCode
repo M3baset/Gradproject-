@@ -1,0 +1,54 @@
+<?php
+header('Content-Type: application/json');
+$rawData = file_get_contents("php://input");
+$data = json_decode($rawData, true);
+
+// DB credentials
+$host = 'aws-0-eu-central-1.pooler.supabase.com';
+$db   = 'postgres';
+$user = 'postgres.czytuqnowdogaowfnfhe';
+$pass = '235711';
+$port = '5432';
+
+try {
+    $conn = new PDO("pgsql:host=$host;port=$port;dbname=$db;sslmode=require", $user, $pass);
+    $conn->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+
+    /* ---------- gas_data (unchanged) ---------- */
+    $stmt1 = $conn->prepare("
+        INSERT INTO gas_data (co2, nh3, alcohol, toluene, acetone, lpg, co, smoke, timestamp)
+        VALUES (:co2, :nh3, :alcohol, :toluene, :acetone, :lpg, :co, :smoke, DEFAULT)
+    ");
+    $stmt1->execute([
+        ':co2'     => $data['co2']     ?? 0,
+        ':nh3'     => $data['nh3']     ?? 0,
+        ':alcohol' => $data['alcohol'] ?? 0,
+        ':toluene' => $data['toluene'] ?? 0,
+        ':acetone' => $data['acetone'] ?? 0,
+        ':lpg'     => $data['lpg']     ?? 0,
+        ':co'      => $data['co']      ?? 0,
+        ':smoke'   => $data['smoke']   ?? 0
+    ]);
+
+    /* ---------- health_data only if valid ---------- */
+    if (isset($data['heart_rate'])            /* ★ */
+        && isset($data['spo2'])               /* ★ */
+        && $data['heart_rate'] > 0            /* ★ */
+        && $data['spo2']      > 0) {          /* ★ */
+
+        $stmt2 = $conn->prepare("
+            INSERT INTO health_data (heart_rate, spo2, sensorid, timestamp)
+            VALUES (:hr, :spo2, :sensorid, DEFAULT)
+        ");
+        $stmt2->execute([
+            ':hr'       => $data['heart_rate'],
+            ':spo2'     => $data['spo2'],
+            ':sensorid' => $data['sensorid'] ?? 'UNKNOWN'
+        ]);
+    }                                         /* ★ */
+
+    echo json_encode(['status' => 'success']);
+} catch (PDOException $e) {
+    echo json_encode(['status' => 'error', 'message' => $e->getMessage()]);
+}
+?>
