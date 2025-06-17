@@ -1,0 +1,232 @@
+cd /home/abaset/Desktop/machineLearning/new/new2
+
+python3 train_and_save.py
+
+import pandas as pd
+import numpy as np
+import joblib
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import StandardScaler
+from xgboost import XGBClassifier
+from sklearn.metrics import classification_report
+
+# ---------------- Load & preprocess ----------------
+df = pd.read_csv('../city_day_clean_dated.csv', parse_dates=['Date']).sort_values('Date')
+
+# Fill missing hours
+full = pd.DataFrame(pd.date_range(df['Date'].min(), df['Date'].max(), freq='h'),  # 'H' → 'h'
+                    columns=['DateTime'])
+df = full.merge(df, left_on=full['DateTime'].dt.date,
+                right_on=df['Date'].dt.date, how='left').ffill()
+df['Date'] = df['DateTime']
+
+# Filter numeric gas columns only (avoid 'DateTime', etc.)
+gas_cols = ['alcohol', 'NH3', 'CO', 'CO2', 'Toluene', 'acetone', 'lpg', 'smoke']
+
+# Create danger flags
+danger_thresholds = {col: np.percentile(df[col].dropna(), 95) for col in gas_cols}
+for col in gas_cols:
+    df[f'{col}_danger'] = (df[col] > danger_thresholds[col]).astype(int)
+
+df['Danger'] = df[[f'{col}_danger' for col in gas_cols]].max(axis=1)
+
+# Time features
+df['Hour']      = df['DateTime'].dt.hour
+df['Weekday']   = df['DateTime'].dt.weekday
+df['Month']     = df['DateTime'].dt.month
+df['Afternoon'] = ((df['Hour'] >= 12) & (df['Hour'] <= 15)).astype(int)
+
+# Simple demo features
+features = ['Hour', 'Weekday', 'Month', 'Afternoon']
+target   = 'Danger'
+
+train = df[df['DateTime'] < '2020-01-01']
+test  = df[df['DateTime'] >= '2020-01-01']
+
+X_train, y_train = train[features], train[target]
+X_test,  y_test  = test[features],  test[target]
+
+# ---------------- Build model ----------------
+model = make_pipeline(
+    StandardScaler(),
+    XGBClassifier(
+        n_estimators=200,
+        max_depth=5,
+        learning_rate=0.1,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        scale_pos_weight=10,
+        random_state=42,
+        eval_metric='logloss'
+    )
+)
+model.fit(X_train, y_train)
+
+print('Training report:')
+print(classification_report(y_train, model.predict(X_train)))
+print('\nTest report:')
+print(classification_report(y_test, model.predict(X_test)))
+
+# ---------------- Save bundle ----------------
+joblib.dump({'model': model, 'features': features}, 'gas_danger_model.pkl')
+print('✔️ Model saved to gas_danger_model.pkl')
+
+
+
+
+
+
+-------------------------------------------
+
+open html 
+
+/home/abaset/Desktop/machineLearning/new/new2/templates
+
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Gas Danger Monitoring</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .dashboard { display: grid; grid-template-columns: 2fr 1fr; gap: 20px; }
+        .card { background: #f5f5f5; padding: 15px; border-radius: 8px; margin-bottom: 15px; }
+        .danger { background: #ffcccc; border-left: 5px solid red; }
+        .safe { background: #ccffcc; border-left: 5px solid green; }
+        .gauge { height: 20px; background: #ddd; border-radius: 10px; margin: 5px 0; }
+        .gauge-fill { height: 100%; border-radius: 10px; }
+    </style>
+</head>
+<body>
+    <h1>Factory Gas Monitoring</h1>
+    <div class="dashboard">
+        <div>
+            <div class="card" id="status-card">
+                <h2>System Status: <span id="overall-status">Loading...</span></h2>
+                <p>Danger Probability: <span id="danger-prob">-</span></p>
+                <div class="gauge">
+                    <div class="gauge-fill" id="danger-gauge"></div>
+                </div>
+            </div>
+            
+            <div class="card">
+                <h2>Gas Levels vs Safety Thresholds</h2>
+                <canvas id="gasChart" height="300"></canvas>
+            </div>
+        </div>
+        
+        <div>
+            <div class="card">
+                <h2>Alerts</h2>
+                <div id="alerts-container"></div>
+            </div>
+            
+            <div class="card">
+                <h2>Key Metrics</h2>
+                <div id="metrics">
+                    <p>Last Updated: <span id="timestamp">-</span></p>
+                    <p>Top Risk Factor: <span id="top-risk">CO_rolling_12h</span></p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let gasChart;
+        
+        // Fetch data every 5 seconds
+        function updateData() {
+            fetch('/api/predict')
+                .then(response => response.json())
+                .then(data => {
+                    // Update overall status
+                    document.getElementById('overall-status').textContent = 
+                        data.overall_status.toUpperCase();
+                    document.getElementById('overall-status').className = data.overall_status;
+                    
+                    // Update danger probability
+                    const dangerPercent = (data.prediction * 100).toFixed(1);
+                    document.getElementById('danger-prob').textContent = `${dangerPercent}%`;
+                    document.getElementById('danger-gauge').style.width = `${dangerPercent}%`;
+                    document.getElementById('danger-gauge').style.backgroundColor = 
+                        data.prediction > 0.4 ? 'red' : 'green';
+                    
+                    // Update timestamp
+                    document.getElementById('timestamp').textContent = 
+                        new Date(data.timestamp).toLocaleString();
+                    
+                    // Update alerts
+                    const alertsContainer = document.getElementById('alerts-container');
+                    alertsContainer.innerHTML = '';
+                    for (const [gas, info] of Object.entries(data.alerts)) {
+                        const alertDiv = document.createElement('div');
+                        alertDiv.className = `card ${info.status}`;
+                        alertDiv.innerHTML = `
+                            <h3>${gas}</h3>
+                            <p>${info.value.toFixed(2)} ppm (Threshold: ${info.threshold} ppm)</p>
+                            <p>Status: <strong>${info.status.toUpperCase()}</strong></p>
+                        `;
+                        alertsContainer.appendChild(alertDiv);
+                    }
+                    
+                    // Update chart
+                    updateChart(data.alerts);
+                });
+        }
+        
+        function updateChart(alerts) {
+            const gases = Object.keys(alerts);
+            const values = gases.map(gas => alerts[gas].value);
+            const thresholds = gases.map(gas => alerts[gas].threshold);
+            
+            if (gasChart) {
+                gasChart.data.datasets[0].data = values;
+                gasChart.data.datasets[1].data = thresholds;
+                gasChart.update();
+            } else {
+                const ctx = document.getElementById('gasChart').getContext('2d');
+                gasChart = new Chart(ctx, {
+                    type: 'bar',
+                    data: {
+                        labels: gases,
+                        datasets: [
+                            {
+                                label: 'Current Level (ppm)',
+                                data: values,
+                                backgroundColor: values.map((v, i) => 
+                                    v > thresholds[i] ? 'rgba(255, 99, 132, 0.7)' : 'rgba(54, 162, 235, 0.7)'
+                                )
+                            },
+                            {
+                                label: 'Safety Threshold',
+                                data: thresholds,
+                                type: 'line',
+                                borderColor: 'rgba(255, 159, 64, 1)',
+                                borderWidth: 2,
+                                fill: false
+                            }
+                        ]
+                    },
+                    options: {
+                        scales: {
+                            y: { beginAtZero: true, title: { display: true, text: 'Concentration (ppm)' } }
+                        }
+                    }
+                });
+            }
+        }
+        
+        // Initial load
+        updateData();
+        setInterval(updateData, 5000);  // Refresh every 5 seconds
+    </script>
+</body>
+</html>
+
+
+--------------------------------------------------------
+
+open http://127.0.0.1:5000/
+
+
+
