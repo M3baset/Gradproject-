@@ -1,0 +1,130 @@
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <Wire.h>
+#include <MAX30105.h>
+#include "spo2_algorithm.h"
+#include <math.h>
+
+// Wi‑Fi credentials
+const char* ssid     = "Hboooooo";
+const char* password = "hbo2023*#";
+
+// Server endpoint
+const char* serverUrl = "http://192.168.1.21/end2.php";
+const char* SENSOR_ID = "wearable_id_1";
+
+// MQ sensor setup
+const int MQ135_PIN = 34;
+const int MQ2_PIN   = 32;
+const float RLOAD   = 10.0; // Must match the physical load resistor value (check your board)
+
+// Pre-measured clean air R0 values (adjust if needed)
+float R0_135 = 9.8;  // for MQ135
+float R0_2   = 8.5;  // for MQ2
+
+// MAX30102 object
+MAX30105 particleSensor;
+uint32_t irBuffer[100], redBuffer[100];
+int32_t heartRate, spo2;
+int8_t validHeartRate, validSpo2;
+
+// Function to read Rs/Ro and convert to ppm using curve formula
+float readSensor(int pin, float R0, float a, float b) {
+  int raw = analogRead(pin);
+  if (raw <= 0) return -1.0;
+  float voltage = (float)raw / 4095.0;
+  float Rs = (4095.0 / raw - 1.0) * RLOAD;
+  float ratio = Rs / R0;
+  if (ratio <= 0) return -1.0;
+  return a * pow(ratio, b);
+}
+
+void setup() {
+  Serial.begin(115200);
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nWi‑Fi connected!");
+
+  analogReadResolution(12);
+  analogSetPinAttenuation(MQ135_PIN, ADC_11db);
+  analogSetPinAttenuation(MQ2_PIN,   ADC_11db);
+
+  // MAX30102 sensor
+  if (!particleSensor.begin(Wire, I2C_SPEED_FAST)) {
+    Serial.println("MAX30102 not found");
+    while (1);
+  }
+  particleSensor.setup();
+  particleSensor.setPulseAmplitudeRed(0x0A);
+  particleSensor.setPulseAmplitudeIR(0x0A);
+}
+
+void loop() {
+  // --- MQ Sensor Readings ---
+  float CO2     = readSensor(MQ135_PIN, R0_135, 116.6, -2.769);   // Approximate from datasheet
+  float NH3     = readSensor(MQ135_PIN, R0_135, 147.4, -1.47);
+  float Alcohol = readSensor(MQ135_PIN, R0_135, 300.0, -0.9);
+  float Toluene = readSensor(MQ135_PIN, R0_135, 250.0, -1.1);
+  float Acetone = readSensor(MQ135_PIN, R0_135, 200.0, -0.95);
+  float LPG     = readSensor(MQ2_PIN,   R0_2,   1000.0, -2.3);
+  float CO      = readSensor(MQ2_PIN,   R0_2,   605.0,  -2.1);    // From MQ-2 datasheet
+  float Smoke   = readSensor(MQ2_PIN,   R0_2,   400.0,  -2.0);
+
+  // --- MAX30102 readings ---
+  for (int i = 0; i < 100; i++) {
+    redBuffer[i] = particleSensor.getRed();
+    irBuffer[i]  = particleSensor.getIR();
+    delay(10);
+  }
+  maxim_heart_rate_and_oxygen_saturation(irBuffer, 100, redBuffer, &spo2, &validSpo2, &heartRate, &validHeartRate);
+
+  // --- Create JSON payload ---
+  String payload = "{";
+
+  auto appendField = [&](const char* name, float value){
+    if (value > 0) {
+      if (payload.length() > 1) payload += ",";
+      payload += "\"" + String(name) + "\":" + String(value, 2);
+    }
+  };
+
+  appendField("co2",      CO2);
+  appendField("nh3",      NH3);
+  appendField("alcohol",  Alcohol);
+  appendField("toluene",  Toluene);
+  appendField("acetone",  Acetone);
+  appendField("lpg",      LPG);
+  appendField("co",       CO);
+  appendField("smoke",    Smoke);
+
+  if (validHeartRate && heartRate > 0) {
+    payload += ",\"heart_rate\":" + String(heartRate);
+  }
+  if (validSpo2 && spo2 > 0) {
+    payload += ",\"spo2\":" + String(spo2);
+  }
+
+  payload += ",\"sensor_id\":\"" + String(SENSOR_ID) + "\"";
+  payload += "}";
+
+  Serial.println("Payload to send:");
+  Serial.println(payload);
+
+  // --- Send HTTP POST ---
+  if (WiFi.status() == WL_CONNECTED && payload.length() > 2) {
+    HTTPClient http;
+    http.begin(serverUrl);
+    http.addHeader("Content-Type", "application/json");
+    int code = http.POST(payload);
+    String resp = http.getString();
+    Serial.printf("HTTP %d: %s\n\n", code, resp.c_str());
+    http.end();
+  } else {
+    Serial.println("No valid data to send or Wi-Fi disconnected\n");
+  }
+
+  delay(5000);
+}
