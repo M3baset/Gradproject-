@@ -1,0 +1,118 @@
+from flask import Flask, jsonify, render_template
+import joblib, pandas as pd, numpy as np
+from datetime import datetime
+import psycopg2
+from psycopg2 import pool
+
+app = Flask(__name__)
+
+# ---------- Load model bundle ----------
+bundle   = joblib.load('gas_danger_model.pkl')
+model    = bundle['model']
+FEATURES = bundle['features']          # ['Hour', 'Weekday', 'Month', 'Afternoon']
+
+# ---------- PostgreSQL connection pool ----------
+PG_POOL = pool.SimpleConnectionPool(
+    1, 5,
+    user="postgres.czytuqnowdogaowfnfhe",
+    password="235711",
+    host="aws-0-eu-central-1.pooler.supabase.com",
+    port="5432",
+    dbname="postgres"
+)
+
+# ---------- Per‑gas safety limits ----------
+SAFETY_THRESHOLDS = {
+    'alcohol': 1000, 'NH3': 25, 'CO': 35, 'CO2': 5000,
+    'Toluene': 100, 'acetone': 750, 'lpg': 1000, 'smoke': 1.0
+}
+
+# ---------- Helper to fetch latest row ----------
+def fetch_latest_reading():
+    """
+    Returns a dict with keys exactly matching the ones used elsewhere:
+    CO2, NH3, alcohol, Toluene, acetone, lpg, CO, smoke, timestamp
+    """
+    sql = """
+        SELECT  co2,
+                nh3,
+                alcohol,
+                toluene,
+                acetone,
+                lpg,
+                co,
+                smoke,
+                "timestamp"
+        FROM    gas_data
+        ORDER BY "timestamp" DESC
+        LIMIT 1;
+    """
+    conn = PG_POOL.getconn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql)
+            row = cur.fetchone()
+            if row is None:
+                return None
+            raw_keys = ['co2','nh3','alcohol','toluene','acetone',
+                        'lpg','co','smoke','timestamp']
+            raw = dict(zip(raw_keys, row))
+            # Map to mixed‑case keys expected elsewhere
+            return {
+                'CO2':      raw['co2'],
+                'NH3':      raw['nh3'],
+                'alcohol':  raw['alcohol'],
+                'Toluene':  raw['toluene'],
+                'acetone':  raw['acetone'],
+                'lpg':      raw['lpg'],
+                'CO':       raw['co'],
+                'smoke':    raw['smoke'],
+                'timestamp':raw['timestamp']
+            }
+    finally:
+        PG_POOL.putconn(conn)
+
+# ---------- Routes ----------
+@app.route('/api/predict', methods=['GET'])
+def predict():
+    current = fetch_latest_reading()
+    if current is None:
+        return jsonify({'error': 'No rows in gas_data table'}), 404
+
+    ts = current['timestamp']
+    now = ts if ts else datetime.now()
+
+    # Add time‑based features
+    current.update({
+        'Hour': now.hour,
+        'Weekday': now.weekday(),
+        'Month': now.month,
+        'Afternoon': int(12 <= now.hour <= 15)
+    })
+
+    # Build feature vector in training order
+    X = pd.DataFrame([[current.get(f, np.nan) for f in FEATURES]], columns=FEATURES)
+    prob = float(model.predict_proba(X)[0, 1])
+
+    # Per‑gas alert block
+    alerts = {
+        g: {
+            'value': current[g],
+            'threshold': thr,
+            'status': 'danger' if current[g] > thr else 'safe'
+        } for g, thr in SAFETY_THRESHOLDS.items()
+    }
+
+    return jsonify({
+        'prediction': prob,
+        'alerts': alerts,
+        'overall_status': 'danger' if prob > 0.4 else 'safe',
+        'timestamp': now.isoformat()
+    })
+
+@app.route('/')
+def dashboard():
+    return render_template('dashboard.html')  # supply your own template
+
+if __name__ == '__main__':
+    app.run(debug=True, port=5000)
